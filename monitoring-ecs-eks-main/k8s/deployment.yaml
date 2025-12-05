@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myservice
+  labels:
+    app: myservice
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myservice
+  template:
+    metadata:
+      labels:
+        app: myservice
+    spec:
+      containers:
+        - name: myservice
+          image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/myservice:<IMAGE_TAG>
+          ports:
+            - containerPort: 5000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10

@@ -1,0 +1,78 @@
+name: CI/CD to ECS
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      ECR_REPO_NAME: project-ecs-cicd-repo
+      ECS_CLUSTER: project-ecs-cicd-cluster
+      ECS_SERVICE: project-ecs-cicd-service
+      CONTAINER_NAME: project-ecs-cicd-container   # must match container name in task definition
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+          docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+      - name: Build Docker image
+        run: |
+          docker build -t $ECR_REPO_NAME .
+
+      - name: Tag & push image to ECR
+        run: |
+          IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPO_NAME:${{ github.sha }}
+          LATEST_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPO_NAME:latest
+          
+          docker tag $ECR_REPO_NAME:latest $IMAGE_URI
+          docker tag $ECR_REPO_NAME:latest $LATEST_URI
+          
+          docker push $IMAGE_URI
+          docker push $LATEST_URI
+
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Register new ECS task definition revision
+        run: |
+          # Get the current task definition
+          TASK_DEF_JSON=$(aws ecs describe-task-definition \
+            --task-definition $ECS_SERVICE \
+            --region ${{ secrets.AWS_REGION }})
+          
+          # Replace the image in the container definition
+          NEW_TASK_DEF=$(echo $TASK_DEF_JSON | jq \
+            --arg IMAGE "$IMAGE_URI" \
+            --arg NAME "$CONTAINER_NAME" \
+            '.taskDefinition | .containerDefinitions[0].image=$IMAGE | .containerDefinitions[0].name=$NAME | {family: .family, containerDefinitions: .containerDefinitions, networkMode, executionRoleArn, taskRoleArn, requiresCompatibilities, cpu, memory}')
+
+          echo "$NEW_TASK_DEF" > new-task-def.json
+
+          # Register new revision
+          NEW_REVISION=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+
+          echo "NEW_REVISION=$NEW_REVISION" >> $GITHUB_ENV
+
+      - name: Update ECS service to use new revision
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $NEW_REVISION \
+            --region ${{ secrets.AWS_REGION }} \
+            --force-new-deployment
